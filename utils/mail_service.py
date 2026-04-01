@@ -21,6 +21,16 @@ from utils import config as cfg
 _CM_TOKEN_CACHE: Optional[str] = None
 LAST_ATTEMPT_EMAIL: Optional[str] = None
 _FREEMAIL_COOKIE_CACHE = {}
+
+_orig_sleep = time.sleep
+def _smart_sleep(secs):
+    for _ in range(int(secs * 10)):
+        if getattr(cfg, 'GLOBAL_STOP', False):
+            return
+        _orig_sleep(0.1)
+time.sleep = _smart_sleep
+
+
 def _ssl_verify() -> bool:
     import os
     flag = os.getenv("OPENAI_SSL_VERIFY", "1").strip().lower()
@@ -96,15 +106,14 @@ def _get_fm_cookie(fm_url: str, fm_user: str, fm_pass: str, proxies: Any = None)
 def get_email_and_token(proxies: Any = None) -> tuple:
     """兼容五种邮箱模式的地址创建，返回 (email, token_or_id)。"""
     global LAST_ATTEMPT_EMAIL
-    mail_proxies = proxies if cfg.USE_PROXY_FOR_EMAIL else None
-
+    if getattr(cfg, 'GLOBAL_STOP', False): return None, None
     letters = "".join(random.choices(string.ascii_lowercase, k=5))
     digits  = "".join(random.choices(string.digits, k=random.randint(1, 3)))
     suffix  = "".join(random.choices(string.ascii_lowercase, k=random.randint(1, 3)))
     prefix  = letters + digits + suffix
 
     mode = cfg.EMAIL_API_MODE
-
+    mail_proxies = proxies if cfg.USE_PROXY_FOR_EMAIL else None
     if mode == "mail_curl":
         try:
             url = f"{cfg.MC_API_BASE}/api/remail?key={cfg.MC_KEY}"
@@ -184,6 +193,7 @@ def get_email_and_token(proxies: Any = None) -> tuple:
             print(f"[{cfg.ts()}] [WARNING] 探测 Freemail 域名列表时异常: {e}")
 
         for attempt in range(5):
+            if getattr(cfg, 'GLOBAL_STOP', False): return None, None
             try:
                 res = requests.get(f"{cfg.FREEMAIL_API_URL.rstrip('/')}/api/generate", params=api_params, headers=headers,
                                    proxies=mail_proxies, verify=_ssl_verify(), timeout=15,
@@ -213,9 +223,24 @@ def get_email_and_token(proxies: Any = None) -> tuple:
         print(f"[{cfg.ts()}] [INFO] 成功生成临时域名邮箱: {email_str}")
         return email_str, ""
 
+    if mode == "luckmail":
+        try:
+            from utils.luckmail_service import LuckMailService
+            lm_service = LuckMailService(
+                api_key=cfg.LUCKMAIL_API_KEY, 
+                preferred_domain=getattr(cfg, 'LUCKMAIL_PREFERRED_DOMAIN', "")
+            )
+            email, token = lm_service.get_email_and_token()
+            print(f"[{cfg.ts()}] [INFO] LuckMail 成功分配邮箱: {email}")
+            return email, token
+        except Exception as e:
+            print(f"[{cfg.ts()}] [ERROR] LuckMail 获取邮箱异常: {e}")
+            return None, None
+
     headers = {"x-admin-auth": cfg.ADMIN_AUTH, "Content-Type": "application/json"}
     body = {"enablePrefix": False, "name": prefix, "domain": selected_domain}
     for attempt in range(5):
+        if getattr(cfg, 'GLOBAL_STOP', False): return None, None
         try:
             res = requests.post(
                 f"{cfg.GPTMAIL_BASE}/admin/new_address",
@@ -392,6 +417,7 @@ def get_oai_code(
             mail_conn = None
 
     for _ in range(20):
+        if getattr(cfg, 'GLOBAL_STOP', False): return ""
         try:
             if mode == "mail_curl":
                 inbox_url = (f"{cfg.MC_API_BASE}/api/inbox"
@@ -576,6 +602,21 @@ def get_oai_code(
                             processed_mail_ids.add(mail_id)
                             print(f" 提取成功: {code}")
                             return code
+            if mode == "luckmail":
+                if not jwt:
+                    print(f"\n[{cfg.ts()}] [ERROR] LuckMail 缺少 token，无法提取验证码！")
+                    return ""
+                try:
+                    from luckmail_service import LuckMailService
+                    lm_service = LuckMailService(api_key=cfg.LUCKMAIL_API_KEY)
+
+                    code = lm_service.get_code(jwt)
+                    if code:
+                        processed_mail_ids.add(jwt)
+                        print(f"\n[{cfg.ts()}] [SUCCESS] LuckMail 提取验证码成功: {code}")
+                        return code
+                except Exception as e:
+                    pass
 
             else:
                 if jwt:
