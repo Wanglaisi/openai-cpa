@@ -24,6 +24,11 @@ _CM_TOKEN_CACHE: Optional[str] = None
 _thread_data = threading.local()
 _orig_sleep = time.sleep
 
+def clear_sticky_domain():
+    """注册失败时调用"""
+    if hasattr(_thread_data, 'sticky_domain'):
+        _thread_data.sticky_domain = None
+
 def set_last_email(email: str):
     _thread_data.last_attempt_email = email
 
@@ -87,6 +92,8 @@ def get_cm_token(proxies=None) -> Optional[str]:
 def get_email_and_token(proxies: Any = None) -> tuple:
     """兼容五种邮箱模式的地址创建，返回 (email, token_or_id)。"""
     if getattr(cfg, 'GLOBAL_STOP', False): return None, None
+    _thread_data.last_attempt_email = None
+    
     letters = "".join(random.choices(string.ascii_lowercase, k=5))
     digits  = "".join(random.choices(string.digits, k=random.randint(1, 3)))
     suffix  = "".join(random.choices(string.ascii_lowercase, k=random.randint(1, 3)))
@@ -94,6 +101,7 @@ def get_email_and_token(proxies: Any = None) -> tuple:
 
     mode = cfg.EMAIL_API_MODE
     mail_proxies = proxies if cfg.USE_PROXY_FOR_EMAIL else None
+
     if mode == "mail_curl":
         try:
             url = f"{cfg.MC_API_BASE}/api/remail?key={cfg.MC_KEY}"
@@ -109,75 +117,6 @@ def get_email_and_token(proxies: Any = None) -> tuple:
             print(f"[{cfg.ts()}] [ERROR] mail-curl 获取邮箱异常: {e}")
         return None, None
 
-    if mode == "cloudmail":
-        token = get_cm_token(mail_proxies)
-        if not token:
-            print(f"[{cfg.ts()}] [ERROR] 未能获取 CloudMail Token，跳过注册")
-            return None, None
-        domain_list = [d.strip() for d in cfg.MAIL_DOMAINS.split(",") if d.strip()]
-        if not domain_list:
-            print(f"[{cfg.ts()}] [ERROR] MAIL_DOMAINS 未配置")
-            return None, None
-        email_str = f"{prefix}@{random.choice(domain_list)}"
-        try:
-            res = requests.post(
-                f"{cfg.CM_API_URL}/api/public/addUser",
-                headers={"Authorization": token},
-                json={"list": [{"email": email_str}]},
-                proxies=mail_proxies, timeout=15,
-            )
-            if res.json().get("code") == 200:
-                set_last_email(email_str)
-                print(f"[{cfg.ts()}] [INFO] CloudMail 成功创建用户: {email_str}")
-                return email_str, ""
-            print(f"[{cfg.ts()}] [ERROR] CloudMail 创建用户失败: {res.text}")
-        except Exception as e:
-            print(f"[{cfg.ts()}] [ERROR] CloudMail 添加用户异常: {e}")
-        return None, None
-
-    if mode == "freemail":
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {cfg.FREEMAIL_API_TOKEN}"
-        }
-        pool = getattr(cfg, 'SUB_DOMAINS_LIST', '') if cfg.ENABLE_SUB_DOMAINS else cfg.MAIL_DOMAINS
-        domain_list = [d.strip() for d in pool.split(",") if d.strip()]
-        
-        if not domain_list:
-            print(f"[{cfg.ts()}] [ERROR] Freemail 域名池为空！请检查配置。")
-            return None, None
-            
-        selected_domain = random.choice(domain_list)
-        email_str = f"{prefix}@{selected_domain}"
-        
-        for attempt in range(5):
-            if getattr(cfg, 'GLOBAL_STOP', False): return None, None
-            try:
-                res = requests.post(f"{cfg.FREEMAIL_API_URL.rstrip('/')}/api/create", 
-                                    json={"email": email_str}, headers=headers,
-                                    proxies=mail_proxies, verify=_ssl_verify(), timeout=15)
-                res.raise_for_status()
-                
-                set_last_email(email_str)
-                print(f"[{cfg.ts()}] [INFO] 成功通过 Freemail 指定创建邮箱: {email_str}")
-                return email_str, ""
-            except Exception as e:
-                print(f"[{cfg.ts()}] [ERROR] Freemail 邮箱创建异常: {e}")
-                time.sleep(2)
-        return None, None
-
-    domain_list = [d.strip() for d in cfg.MAIL_DOMAINS.split(",") if d.strip()]
-    if not domain_list:
-        print(f"[{cfg.ts()}] [ERROR] MAIL_DOMAINS 配置为空，无法生成邮箱！")
-        return None, None
-    selected_domain = random.choice(domain_list)
-    email_str = f"{prefix}@{selected_domain}"
-
-    if mode == "imap":
-        set_last_email(email_str)
-        print(f"[{cfg.ts()}] [INFO] 成功生成临时域名邮箱: {email_str}")
-        return email_str, ""
-
     if mode == "luckmail":
         try:
             from utils.luckmail_service import LuckMailService
@@ -192,30 +131,101 @@ def get_email_and_token(proxies: Any = None) -> tuple:
             print(f"[{cfg.ts()}] [ERROR] LuckMail 获取邮箱异常: {e}")
             return None, None
 
-    headers = {"x-admin-auth": cfg.ADMIN_AUTH, "Content-Type": "application/json"}
-    body = {"enablePrefix": False, "name": prefix, "domain": selected_domain}
-    for attempt in range(5):
-        if getattr(cfg, 'GLOBAL_STOP', False): return None, None
+    if cfg.ENABLE_SUB_DOMAINS:
+        sticky = getattr(_thread_data, 'sticky_domain', None)
+        if sticky:
+            selected_domain = sticky
+            print(f"[{cfg.ts()}] [INFO] 多级域名模式 - 沿用上一轮成功域名: {selected_domain}")
+        else:
+            main_list = [d.strip() for d in cfg.MAIL_DOMAINS.split(",") if d.strip()]
+            if not main_list:
+                print(f"[{cfg.ts()}] [ERROR] 未配置主域名池，无法捏造子域！")
+                return None, None
+                
+            selected_main = random.choice(main_list)
+            level = getattr(cfg, 'SUB_DOMAIN_LEVEL', 1) 
+            
+            random_parts = [''.join(random.choices(string.ascii_lowercase + string.digits, k=8)) for _ in range(level)]
+            selected_domain = ".".join(random_parts) + f".{selected_main}"
+            _thread_data.sticky_domain = selected_domain
+    else:
+        domain_list = [d.strip() for d in cfg.MAIL_DOMAINS.split(",") if d.strip()]
+        if not domain_list:
+            print(f"[{cfg.ts()}] [ERROR] 域名池配置为空，无法生成邮箱！")
+            return None, None
+        selected_domain = random.choice(domain_list)
+
+    email_str = f"{prefix}@{selected_domain}"
+    set_last_email(email_str)
+    
+    if mode == "cloudmail":
+        token = get_cm_token(mail_proxies)
+        if not token:
+            print(f"[{cfg.ts()}] [ERROR] 未能获取 CloudMail Token，跳过注册")
+            return None, None
         try:
             res = requests.post(
-                f"{cfg.GPTMAIL_BASE}/admin/new_address",
-                headers=headers, json=body,
-                proxies=mail_proxies, verify=_ssl_verify(), timeout=15,
+                f"{cfg.CM_API_URL}/api/public/addUser",
+                headers={"Authorization": token},
+                json={"list": [{"email": email_str}]},
+                proxies=mail_proxies, timeout=15,
             )
-            res.raise_for_status()
-            data = res.json()
-            if data and data.get("address"):
-                email = data["address"].strip()
-                jwt = data.get("jwt", "").strip()
-                set_last_email(email)
-                print(f"[{cfg.ts()}] [INFO] 成功获取临时邮箱: {email}")
-                return email, jwt
-            print(f"[{cfg.ts()}] [WARNING] 邮箱申请失败 (尝试 {attempt+1}/5): {res.text}")
-            time.sleep(1)
+            if res.json().get("code") == 200:
+                print(f"[{cfg.ts()}] [INFO] CloudMail 成功创建用户: {email_str}")
+                return email_str, ""
+            print(f"[{cfg.ts()}] [ERROR] CloudMail 创建用户失败: {res.text}")
         except Exception as e:
-            print(f"[{cfg.ts()}] [ERROR] 邮箱注册网络异常，准备重试: {e}")
-            time.sleep(2)
-    return None, None
+            print(f"[{cfg.ts()}] [ERROR] CloudMail 添加用户异常: {e}")
+        return None, None
+
+    if mode == "freemail":
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {cfg.FREEMAIL_API_TOKEN}"
+        }
+        for attempt in range(5):
+            if getattr(cfg, 'GLOBAL_STOP', False): return None, None
+            try:
+                res = requests.post(f"{cfg.FREEMAIL_API_URL.rstrip('/')}/api/create", 
+                                    json={"email": email_str}, headers=headers,
+                                    proxies=mail_proxies, verify=_ssl_verify(), timeout=15)
+                res.raise_for_status()
+                print(f"[{cfg.ts()}] [INFO] 成功通过 Freemail 指定创建邮箱: {email_str}")
+                return email_str, ""
+            except Exception as e:
+                print(f"[{cfg.ts()}] [ERROR] Freemail 邮箱创建异常: {e}")
+                time.sleep(2)
+        return None, None
+
+    if mode == "imap":
+        print(f"[{cfg.ts()}] [INFO] imap成功生成临时域名邮箱: {email_str}")
+        return email_str, ""
+
+    if mode == "cloudflare_temp_email":
+        headers = {"x-admin-auth": cfg.ADMIN_AUTH, "Content-Type": "application/json"}
+        body = {"enablePrefix": False, "name": prefix, "domain": selected_domain}
+        for attempt in range(5):
+            if getattr(cfg, 'GLOBAL_STOP', False): return None, None
+            try:
+                res = requests.post(
+                    f"{cfg.GPTMAIL_BASE}/admin/new_address",
+                    headers=headers, json=body,
+                    proxies=mail_proxies, verify=_ssl_verify(), timeout=15,
+                )
+                res.raise_for_status()
+                data = res.json()
+                if data and data.get("address"):
+                    email = data["address"].strip()
+                    jwt = data.get("jwt", "").strip()
+                    set_last_email(email)
+                    print(f"[{cfg.ts()}] [INFO] cloudflare_temp_email成功获取临时邮箱: {email}")
+                    return email, jwt
+                print(f"[{cfg.ts()}] [WARNING] cloudflare_temp_email邮箱申请失败 (尝试 {attempt+1}/5): {res.text}")
+                time.sleep(1)
+            except Exception as e:
+                print(f"[{cfg.ts()}] [ERROR] cloudflare_temp_email邮箱注册网络异常，准备重试: {e}")
+                time.sleep(2)
+        return None, None
 
 def _decode_mime_header(value: str) -> str:
     if not value:

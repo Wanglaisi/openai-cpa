@@ -33,7 +33,6 @@ def init_config():
 _c: dict = {}
 ENABLE_SUB_DOMAINS: bool = False
 SUB_DOMAIN_COUNT: int = 10
-SUB_DOMAINS_LIST: str = ""
 EMAIL_API_MODE: str = ""
 MAIL_DOMAINS: str = ""
 GPTMAIL_BASE: str = ""
@@ -77,7 +76,7 @@ REMOVE_DEAD_ACCOUNTS: bool = False
 CPA_THREADS: int = 10
 CHECK_INTERVAL_MINUTES: int = 60
 ENABLE_TOKEN_REVIVE: bool = False
-
+SUB_DOMAIN_LEVEL: int = 10
 ENABLE_SUB2API_MODE: bool = False
 SUB2API_URL: str = ""
 SUB2API_KEY: str = ""
@@ -95,9 +94,6 @@ NORMAL_SLEEP_MIN: int = 5
 NORMAL_SLEEP_MAX: int = 30
 NORMAL_TARGET_COUNT: int = 0
 
-SUB_DOMAIN_FAIL_THRESHOLD = 3
-SUB_DOMAIN_REFILL_COUNT = 1
-
 _clash_enable: bool = False
 _clash_pool_mode: bool = False
 WARP_PROXY_LIST: list = []
@@ -106,12 +102,13 @@ PROXY_QUEUE: queue.Queue = queue.Queue()
 def reload_all_configs():
     global _c
     global EMAIL_API_MODE, MAIL_DOMAINS, GPTMAIL_BASE, ADMIN_AUTH
-    global ENABLE_SUB_DOMAINS, SUB_DOMAIN_COUNT, SUB_DOMAINS_LIST
+    global ENABLE_SUB_DOMAINS, SUB_DOMAIN_COUNT
     global IMAP_SERVER, IMAP_PORT, IMAP_USER, IMAP_PASS
     global FREEMAIL_API_URL, FREEMAIL_API_TOKEN
     global CM_API_URL, CM_ADMIN_EMAIL, CM_ADMIN_PASS
     global MC_API_BASE, MC_KEY
     global DEFAULT_PROXY
+    global SUB_DOMAIN_LEVEL
     global ENABLE_MULTI_THREAD_REG, REG_THREADS, MAX_OTP_RETRIES
     global USE_PROXY_FOR_EMAIL, ENABLE_EMAIL_MASKING
     global LOGIN_DELAY_MIN, LOGIN_DELAY_MAX
@@ -126,7 +123,6 @@ def reload_all_configs():
     global SUB2API_SAVE_TO_LOCAL, SUB2API_MIN_REMAINING_WEEKLY_PERCENT
     global SUB2API_REMOVE_ON_LIMIT_REACHED, SUB2API_REMOVE_DEAD_ACCOUNTS, SUB2API_ENABLE_TOKEN_REVIVE
     global LUCKMAIL_API_KEY,LUCKMAIL_PREFERRED_DOMAIN
-    global SUB_DOMAIN_FAIL_THRESHOLD, SUB_DOMAIN_REFILL_COUNT
     
     _c = init_config()
 
@@ -213,16 +209,8 @@ def reload_all_configs():
     _luckmail        = _c.get("luckmail", {})
     LUCKMAIL_API_KEY = _luckmail.get("api_key", "")
     LUCKMAIL_PREFERRED_DOMAIN = _luckmail.get("preferred_domain", "")
-    
+    SUB_DOMAIN_LEVEL = _c.get("sub_domain_level", {})
     ENABLE_SUB_DOMAINS = _c.get("enable_sub_domains", False)
-    SUB_DOMAINS_LIST = _c.get("sub_domains_list", "")
-
-    if EMAIL_API_MODE in ["imap", "freemail", "cloudflare_temp_email", "cloudmail"] and ENABLE_SUB_DOMAINS and SUB_DOMAINS_LIST:
-        MAIL_DOMAINS = SUB_DOMAINS_LIST
-    else:
-        MAIL_DOMAINS = MAIL_DOMAINS
-    SUB_DOMAIN_FAIL_THRESHOLD = _c.get("sub_domain_fail_threshold", 3)
-    SUB_DOMAIN_REFILL_COUNT = _c.get("sub_domain_refill_count", 1)
     reload_proxy_config()
     print(f"[{ts()}] [系统] 核心配置已完成同步。")
 

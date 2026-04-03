@@ -481,7 +481,9 @@ def handle_registration_result(result: Any, cpa_upload: bool = False) -> str:
     password = None
     if result and isinstance(result, (tuple, list)) and len(result) >= 2:
         token_json_str, password = result
-
+        
+    ret_status = "success"
+     
     if not token_json_str or token_json_str == "retry_403":
         if token_json_str == "retry_403":
             run_stats["retries"] += 1
@@ -490,43 +492,28 @@ def handle_registration_result(result: Any, cpa_upload: bool = False) -> str:
         else:
             run_stats["failed"] += 1
             ret_status = "failed"
+        if cfg.ENABLE_SUB_DOMAINS:
+            mail_service.clear_sticky_domain() 
+            print(f"[{ts()}] [系统] 域名 {mask_email(cur_dom or '')} 注册失败，下一轮重新生成。")
+            
+    else:
+        run_stats["success"] += 1
+        token_data    = json.loads(token_json_str)
+        account_email = token_data.get("email", "unknown")
 
-        if cfg.ENABLE_SUB_DOMAINS and cur_dom:
-            with _heal_lock:
-                sub_fail_counts[cur_dom] = sub_fail_counts.get(cur_dom, 0) + 1
-                fails = sub_fail_counts[cur_dom]
+        # 存入本地数据库
+        if (cpa_upload and cfg.SAVE_TO_LOCAL_IN_CPA_MODE) or not cpa_upload:
+            if db_manager.save_account_to_db(account_email, password, token_json_str):
+                print(f"[{ts()}] [SUCCESS] 账号密码与 Token 已安全存入: {mask_email(account_email)}")
 
-            if fails >= cfg.SUB_DOMAIN_FAIL_THRESHOLD:
-                auto_heal_subdomain(cur_dom)
-                with _heal_lock: 
-                    sub_fail_counts[cur_dom] = 0 
+        # CPA 云端上传
+        if cpa_upload:
+            success, up_msg = upload_to_cpa_integrated(token_data, cfg.CPA_API_URL, cfg.CPA_API_TOKEN)
+            if success:
+                print(f"[{ts()}] [SUCCESS] 补货凭证 {mask_email(account_email)} 云端上传成功！")
             else:
-                print(f"[{ts()}] [DEBUG] 域名 {mask_email(cur_dom)} 失败计数 ({fails}/{cfg.SUB_DOMAIN_FAIL_THRESHOLD})")
-
-        return ret_status
-
-    if cur_dom:
-        with _heal_lock: 
-            sub_fail_counts[cur_dom] = 0
-
-    run_stats["success"] += 1
-    token_data    = json.loads(token_json_str)
-    account_email = token_data.get("email", "unknown")
-
-    # 存入数据库
-    if (cpa_upload and cfg.SAVE_TO_LOCAL_IN_CPA_MODE) or not cpa_upload:
-        if db_manager.save_account_to_db(account_email, password, token_json_str):
-            print(f"[{ts()}] [SUCCESS] 账号密码与 Token 已安全存入: {mask_email(account_email)}")
-
-    # CPA 云端上传
-    if cpa_upload:
-        success, up_msg = upload_to_cpa_integrated(token_data, cfg.CPA_API_URL, cfg.CPA_API_TOKEN)
-        if success:
-            print(f"[{ts()}] [SUCCESS] 补货凭证 {mask_email(account_email)} 云端上传成功！")
-        else:
-            print(f"[{ts()}] [ERROR] 云端上传失败: {up_msg}")
-
-    return "success"
+                print(f"[{ts()}] [ERROR] 云端上传失败: {up_msg}")
+    return ret_status
 
 def run_and_refresh(proxy, args, cpa_upload=False, skip_switch=False):
     proxy = format_docker_url(proxy)
@@ -534,15 +521,118 @@ def run_and_refresh(proxy, args, cpa_upload=False, skip_switch=False):
     if not skip_switch:
         if not smart_switch_node(proxy):
             print(f"[{ts()}] [WARNING] {proxy} 节点切换失败，将使用当前 IP 继续尝试...")
-    result = run(proxy)
+    
+    result = None
+    try:
+        result = run(proxy) 
+    except Exception as e:
+        print(f"[{ts()}] [ERROR] 注册线程发生未捕获异常")
+
     return handle_registration_result(result, cpa_upload=cpa_upload)
 
+# def auto_heal_subdomain(failed_domain: str):
+    # print(f"[{ts()}] [自愈] 域名 {failed_domain} 达到失败阈值，触发更替程序...")
+    # import wfxl_openai_regst 
+    # cf_cfg = getattr(cfg, '_c', {})
+    # api_email = cf_cfg.get("cf_api_email")
+    # api_key = cf_cfg.get("cf_api_key")
+    # root_str = cf_cfg.get("mail_domains", "")
+    # root_domains = [d.strip() for d in root_str.split(",") if d.strip()]
+    
+    # main_dom = None
+    # for root in root_domains:
+        # if failed_domain.endswith(root):
+            # main_dom = root
+            # break
+    # if not main_dom:
+        # print(f"[{ts()}] [ERROR] 无法识别 {failed_domain} 所属的主域，请检查配置！")
+        # return
+        
+        
+    # level = cf_cfg.get("sub_domain_level", 1)
+    
+    # try:
+        # from cloudflare import Cloudflare
+        # cf = Cloudflare(api_email=api_email, api_key=api_key)
+        # zones = cf.zones.list(name=main_dom)
+        # if zones.result:
+            # zone_id = zones.result[0].id
+            # url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/email/routing/dns"
+            # headers = {"X-Auth-Email": api_email, "X-Auth-Key": api_key, "Content-Type": "application/json"}
+            # payload = json.dumps({"name": failed_domain}).encode('utf-8')
+            # requests.delete(url, data=payload, headers=headers, impersonate="chrome110")
+            # wfxl_openai_regst.dispatch_email_backend_delete(failed_domain, cf_cfg)
+            # print(f"[{ts()}] [自愈] 已成功注销失效域名: {mask_email(failed_domain)}")
+    # except Exception as e:
+        # print(f"[{ts()}] [ERROR] 销毁失效域名异常: {e}")
+        # return
+
+    # refill_num = int(getattr(cfg, 'SUB_DOMAIN_REFILL_COUNT', 1))
+    # new_domains = []
+    # for _ in range(refill_num):
+        # random_parts = []
+        # for _ in range(level):
+            # random_parts.append(''.join(random.choices(string.ascii_lowercase + string.digits, k=8)))
+        # new_domains.append(".".join(random_parts) + f".{main_dom}")
+
+    # with _heal_lock:
+        # current_list = [d.strip() for d in cfg.SUB_DOMAINS_LIST.split(",") if d.strip()]
+        # if failed_domain in current_list:
+            # current_list.remove(failed_domain)
+        # current_list.extend(new_domains)
+        
+        # config_path = "config.yaml"
+        # try:
+            # with open(config_path, "r", encoding="utf-8") as f:
+                # y = yaml.safe_load(f) or {}
+            # y["sub_domains_list"] = ",".join(current_list)
+            # y["sub_domain_fail_threshold"] = cfg.SUB_DOMAIN_FAIL_THRESHOLD
+            # y["sub_domain_refill_count"] = cfg.SUB_DOMAIN_REFILL_COUNT
+            
+            # with open(config_path, "w", encoding="utf-8") as f:
+                # yaml.dump(y, f, allow_unicode=True, sort_keys=False)
+            # reload_all_configs()
+        # except Exception as e:
+            # print(f"[{ts()}] [ERROR] 自愈配置保存失败: {e}")
+
+    # for ns in new_domains:
+        # try:
+            # cf.email_routing.dns.create(zone_id=zone_id, name=ns)
+            # wfxl_openai_regst.dispatch_email_backend_add(ns, cf_cfg)
+            # print(f"[{ts()}] [自愈] 已补货新域名 {ns}，等待生效...")
+        # except: pass
+
+    # print(f"[{ts()}] [自愈] 正在进入状态监控，等待 Cloudflare 激活路由...")
+    # retry_count = 0
+    # while True:
+        # try:
+            # info = cf.email_routing.get(zone_id=zone_id)
+            # res_data = getattr(info, 'result', info)
+            # status = getattr(res_data, 'status', 'unknown')
+            # synced = getattr(res_data, 'synced', False)
+
+            # retry_count += 1
+            
+            # print(f"[{ts()}] [监控] (等待中...)")
+            
+            # if status == 'ready':
+                # if synced is True or retry_count > 20: 
+                    # print(f"[{ts()}] [SUCCESS] 域名池状态确认完成，准备恢复业务线程。")
+                    # break
+                    
+        # except Exception as e:
+            # print(f"[{ts()}] [WARNING] 状态监控请求异常 (重试中): {e}")
+            # if retry_count > 6: break
+            
+        # time.sleep(10)
+        
 def auto_heal_subdomain(failed_domain: str):
-    print(f"[{ts()}] [自愈] 域名 {failed_domain} 达到失败阈值，触发更替程序...")
-    import wfxl_openai_regst 
+    """
+    功能：仅销毁本地失效域名记录。
+    """
+    print(f"[{ts()}] [自愈] 域名 {failed_domain} 达到失败阈值，启动快速更替程序...")
+    
     cf_cfg = getattr(cfg, '_c', {})
-    api_email = cf_cfg.get("cf_api_email")
-    api_key = cf_cfg.get("cf_api_key")
     root_str = cf_cfg.get("mail_domains", "")
     root_domains = [d.strip() for d in root_str.split(",") if d.strip()]
     
@@ -551,29 +641,12 @@ def auto_heal_subdomain(failed_domain: str):
         if failed_domain.endswith(root):
             main_dom = root
             break
+            
     if not main_dom:
-        print(f"[{ts()}] [ERROR] 无法识别 {failed_domain} 所属的主域，请检查配置！")
-        return
-        
-        
-    level = cf_cfg.get("sub_domain_level", 1)
-    
-    try:
-        from cloudflare import Cloudflare
-        cf = Cloudflare(api_email=api_email, api_key=api_key)
-        zones = cf.zones.list(name=main_dom)
-        if zones.result:
-            zone_id = zones.result[0].id
-            url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/email/routing/dns"
-            headers = {"X-Auth-Email": api_email, "X-Auth-Key": api_key, "Content-Type": "application/json"}
-            payload = json.dumps({"name": failed_domain}).encode('utf-8')
-            requests.delete(url, data=payload, headers=headers, impersonate="chrome110")
-            wfxl_openai_regst.dispatch_email_backend_delete(failed_domain, cf_cfg)
-            print(f"[{ts()}] [自愈] 已成功注销失效域名: {mask_email(failed_domain)}")
-    except Exception as e:
-        print(f"[{ts()}] [ERROR] 销毁失效域名异常: {e}")
+        print(f"[{ts()}] [ERROR] 无法识别 {failed_domain} 所属的主域，跳过自愈。")
         return
 
+    level = cf_cfg.get("sub_domain_level", 1)
     refill_num = int(getattr(cfg, 'SUB_DOMAIN_REFILL_COUNT', 1))
     new_domains = []
     for _ in range(refill_num):
@@ -592,46 +665,21 @@ def auto_heal_subdomain(failed_domain: str):
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 y = yaml.safe_load(f) or {}
+            
             y["sub_domains_list"] = ",".join(current_list)
             y["sub_domain_fail_threshold"] = cfg.SUB_DOMAIN_FAIL_THRESHOLD
             y["sub_domain_refill_count"] = cfg.SUB_DOMAIN_REFILL_COUNT
             
             with open(config_path, "w", encoding="utf-8") as f:
                 yaml.dump(y, f, allow_unicode=True, sort_keys=False)
+            
             reload_all_configs()
+            for ns in new_domains:
+                print(f"[{ts()}] [自愈] 已成功补货新域名: {ns}")
+                
+            print(f"[{ts()}] [SUCCESS] 配置文件已更新，业务线程将无缝切换新域名。")
         except Exception as e:
             print(f"[{ts()}] [ERROR] 自愈配置保存失败: {e}")
-
-    for ns in new_domains:
-        try:
-            cf.email_routing.dns.create(zone_id=zone_id, name=ns)
-            wfxl_openai_regst.dispatch_email_backend_add(ns, cf_cfg)
-            print(f"[{ts()}] [自愈] 已补货新域名 {ns}，等待生效...")
-        except: pass
-
-    print(f"[{ts()}] [自愈] 正在进入状态监控，等待 Cloudflare 激活路由...")
-    retry_count = 0
-    while True:
-        try:
-            info = cf.email_routing.get(zone_id=zone_id)
-            res_data = getattr(info, 'result', info)
-            status = getattr(res_data, 'status', 'unknown')
-            synced = getattr(res_data, 'synced', False)
-
-            retry_count += 1
-            if retry_count % 4 == 0:
-                print(f"[{ts()}] [监控] (等待中...)")
-
-            if status == 'ready':
-                if synced is True or retry_count > 20: 
-                    print(f"[{ts()}] [SUCCESS] 域名池状态确认完成，准备恢复业务线程。")
-                    break
-                    
-        except Exception as e:
-            print(f"[{ts()}] [WARNING] 状态监控请求异常 (重试中): {e}")
-            if retry_count > 10: break
-            
-        time.sleep(15)
 
 def _handle_sub2api_dead_account(item: dict, client: Any, is_disabled: bool) -> None:
     """统一处理 Sub2API 彻底死亡账号（删除或禁用）"""
