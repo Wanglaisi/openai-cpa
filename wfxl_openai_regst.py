@@ -731,6 +731,9 @@ if __name__ == "__main__":
     try: reload_all_configs()
     except: pass
 
+    # === 新增/修改的部分 ===
+    PORT = int(os.getenv("PORT", 8000))   # HF 会自动注入 $PORT
+    
     print("=" * 65)
     print(f"[{core_engine.ts()}] [系统] OpenAI 无限注册 & CPA 智能仓管")
     print(f"[{core_engine.ts()}] [系统] Author: (wenfxl)轩灵")
