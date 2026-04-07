@@ -1,23 +1,25 @@
-FROM python:3.11-slim
+# Python 缓存文件
+__pycache__/
+*.py[cod]
+*$py.class
+utils/__pycache__/
 
-WORKDIR /app
+# IDE 配置文件
+.idea/
+.vscode/
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+# 本地数据库和日志
+data/
+*.db
+*.log
 
-COPY requirements.txt .
+# 本地备份配置
+*副本*.yaml
 
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+# config.yaml 本地敏感配置不提交，但需提供 config.example.yaml
+config.yaml
 
-COPY . .
-
-RUN rm -rf utils/auth_core/*.py 2>/dev/null || true
-
-EXPOSE 7860
-
-ENV PYTHONUNBUFFERED=1
-ENV PORT=7860
-
-CMD ["python", "wfxl_openai_regst.py"]
+# 加密核心模块（保留 .pyd 编译文件）
+utils/sentinel.py
+utils/auth_core/
+!utils/auth_core.pyd
