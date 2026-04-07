@@ -7,3 +7,5 @@ httpx
 curl_cffi 
 PySocks 
 cloudflare
+sqlalchemy
+psycopg2-binary
